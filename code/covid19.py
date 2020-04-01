@@ -18,13 +18,15 @@ def exponentialgrowth(x, A, tau):
     return A*np.exp(x/tau)
 
 #fit the data to an exponential for multiple number of data points.
-days = range(8,26)
+days = range(8,30)
 Ytime =[]
 Yamp = []
 for i in days:
     rowtime = []
     rowamp = []
     for country, cases in data:
+        # if country == "China.txt":
+        #     break
         if len(cases) >= i:
             x = cases[:i,0]
             y = cases[:i,1]
@@ -39,11 +41,11 @@ for i in days:
 Y = np.concatenate(np.asarray(Ytime))
 Y = Y.reshape(len(days), len(onlyfiles), 3)
 c = Y[:,7,1]
-for i in range(len(onlyfiles)):
+for i in range(1,len(onlyfiles)):
     y = Y[:,i,2]
     plt.plot(days, y , label=Y[0,i,0])
 plt.legend()
-#plt.show()
+plt.show()
 #def SIR_Solver(beta, gamma)
 ##Now let's use the SIR model to see how things could evolve
 #Overall constants:

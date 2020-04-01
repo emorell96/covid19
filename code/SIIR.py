@@ -9,6 +9,8 @@ from scipy.interpolate import interp1d
 from countryinfo import CountryInfo
 from matplotlib.ticker import (MultipleLocator, FormatStrFormatter,
                                AutoMinorLocator)
+import datetime as date
+
 
 
 mypath = r"C:\Users\emore\Documents\covid19 analysis\data\\"
@@ -178,11 +180,18 @@ isolation_days = 100 #days
 risefalltime = 3 #days
 c_value = 0.5
 death_rate = 0.003
+filebase = f"C:\\Users\\emore\\Documents\\covid19 analysis\\data_out\\covid19SIIR_{date.datetime.today().strftime('%Y-%m-%d')}_"
 
-def fitter(model, time, cases, recovered = None, deaths = None, points = 2000, first_days = -1):
-    #cases are the confirmed cases, and it should be a np array with actual dat
+def fitter(model, time, cases, recovered = None, deaths = None, points = 2000, first_days = -1, logarithmic = False):
+    #cases are the confirmed cases, and it should be a np array with actual data
     #recovered data for recovered
     #time is the first parameter for curve_fit
+    #This function has for aim to find the best parameters for the model in order to best fit to the available data.
+    #It will try its best to fit to the total number of cases, the total recovered and total deaths trying to find the best parameters.
+    #If some of this data is missing then it will fit to just the available data.
+    #A word of caution the predicted deaths is pretty inaccurate since that's usually what we lack the most in data since there's a delay
+    #between people falling ill and dying.
+    #the logarithmic mode (to try to help the fit by fitting to more linear data is not working well yet DO NOT USE. (leave it as False))
     global_gamma = model.gamma
     global_beta = model.beta
     global_c = model.c
@@ -202,8 +211,12 @@ def fitter(model, time, cases, recovered = None, deaths = None, points = 2000, f
         model.beta = global_beta
         T, Y = model.solve(points)
         return interp1d(T, Y[:, 4], kind='cubic')(t)
-    
+    #This function allows us to fit to the three available metrics at the SAME time. Meaning it will find the best set of parameters which will approximate the solution the best.
     def _fit_multiple_all(comboData, _beta, _gamma, _c = global_c, _lambda = global_lambda, _death_rate = global_death):
+        """
+        #This function allows us to fit to the three available metrics at the SAME time. Meaning it will find the best set of parameters which will approximate the solution the best.
+        comboData should be an appended numpy array with cases, recovered and deaths.
+        """
         #arrays = len(comboData)/len(cases)
         extract1 = comboData[:len(cases)] # first data
         extract2 = comboData[len(cases):2*len(cases)]
@@ -232,6 +245,14 @@ def fitter(model, time, cases, recovered = None, deaths = None, points = 2000, f
         result2 = interp1d(T, Y[:, 4], kind='linear')(extract2)
         #result3 = interp1d(T, Y[:,5])(extract3)
         return np.append(result1, result2)
+    def cleaner(data):
+        if logarithmic:
+            #we clean data (replace the zeros whith ones to avoid a log 0 to give infinity 1 is extremely close to one case in the sense of a population of millions)
+            data[data < 1] = 1
+            return np.log(data)
+        else:
+            #don't clean if not log
+            return data
     #print(1/global_lambda/24)
     # model.gamma, model.beta = (global_gamma, global_beta)
     # model.c = global_c
@@ -239,10 +260,10 @@ def fitter(model, time, cases, recovered = None, deaths = None, points = 2000, f
         comboDataY = np.append(np.append(cases, recovered), deaths)
         comboDataX = np.append(np.append(time, time), time)
         if model.country == "Italy":
-            global_beta = 1/80
+            global_beta = 1/3
             global_gamma = 1/10
-            global_c = 1
-            global_lambda = 1/4
+            global_c = 1e-9
+            global_lambda = 1/1
             popt, pcov = curve_fit(_fit_multiple_all, comboDataX, comboDataY, p0=[global_beta, global_gamma, global_c, global_lambda, death_rate], bounds=([1/100, 1/200, 1e-19, 0, 0], [200, 100, 1, 500, 1]))
         else:
             popt, pcov = curve_fit(_fit_multiple_all, comboDataX, comboDataY, p0=[global_beta, global_gamma, global_c, global_lambda, death_rate], bounds=([1/100, 1/200, 1e-19, 0, 0], [200, 100, 1, 500, 1]))
@@ -267,8 +288,6 @@ def fitter(model, time, cases, recovered = None, deaths = None, points = 2000, f
 #     model.set_initial_conditions(model.total_pop, 20, Qh0=0, R0=3, D0=0)
 #     return model.solve(points)
 Models = {}
-
-
 for country, table in data.values():
     name = country.replace(".txt", "")
     x = table[:,0]
@@ -289,11 +308,12 @@ for country, table in data.values():
         pass
     model.set_initial_conditions(model.total_pop-i0-d0-r0, I0=i0-r0, Qh0=0, R0=r0, D0=d0)
     try:
-        # if model.country == "France":
-        #     offset = 
-        #     model = fitter(model, table[:offset,0], table[:offset,1], table[:offset,2], table[:offset,3])
-        # else:
-        model = fitter(model, table[:,0], table[:,1], table[:,2], table[:,3])
+        if model.country == "France":
+            offset = -1
+            d = table[:,0]
+            model = fitter(model, table[:,0], table[:,1], table[:,2], table[:,3])
+        else:
+            model = fitter(model, table[:,0], table[:,1], table[:,2], table[:,3])
     except:
         try:
             model = fitter(model, table[:,0], table[:,1], table[:,2])
@@ -311,9 +331,9 @@ for country, table in data.values():
 
 
 for model in Models.values():
-    sim_days = 60
+    sim_days = 90
     model.t1 = model.t1 + sim_days
-
+    
     #activate a 30 days quarantine:
     model.isolation = False
     model.isolation_time = 250
@@ -327,9 +347,10 @@ for model in Models.values():
     index = np.argmax(Y[:,1]+Y[:,2])
     indexcum = np.argmax(Y[:,1]+Y[:,2]+Y[:,4]+Y[:,5])
     index2 = np.argmax(Y[:,5])
-
+    #save Y in file for later use
+    np.save(filebase+f"{model.country}.npy", Y)
     #Default label in English
-    title = f"Simulation using a deterministic model, based on current data, for the Covid 19 pandemic in {model.country}. t = 0 is 29th of March."
+    title = f"Simulation using a deterministic model, based on current data, for the Covid 19 pandemic in {model.country}. t = 0 is 30th of March."
     labelcumulative = f"Total (Cumulative) Infected: {model.country}; Max = {(Y[indexcum,1]+Y[indexcum,2]+Y[indexcum,4]+Y[indexcum,5])/1e6:.3f} million people ({(Y[indexcum,1]+Y[indexcum,2]+Y[indexcum, 4])/model.total_pop*100:.3f} %)"
     actualcaseslabel = f"Actual Cases: {model.country}"
     labeldeaths = f"Deaths: {model.country}, max = {Y[index2,5]/1e6:.3f} million people ({Y[index2,5]/model.total_pop*100:.3f} %)"
@@ -340,7 +361,7 @@ for model in Models.values():
     infectedlabel = f"(NOT Cumulative) Infected on a given day: {model.country}; Max = {(Y[index,1]+Y[index,2])/1e6:.1f} million people ({(Y[index,1]+Y[index,2])/model.total_pop*100:.2f} %)"
     #Translation for different countries:
     if model.country == "Russia":
-        title = f"Моделирование перехода Covid 19 в России с использованием модели SIIR (восприимчивый, зараженный, изолированный, восстановленный).\nСледующие {sim_days} дней\nt = 0 - 29 марта 2020 г."
+        title = f"Моделирование перехода Covid 19 в России с использованием модели SIIR (восприимчивый, зараженный, изолированный, восстановленный).\nСледующие {sim_days} дней\nt = 0 - 30 марта 2020 г."
         labelcumulative = f"Общее количество случаев (накопительное) в России; Максимальное количество дел =  {(Y[indexcum,1]+Y[indexcum,2]+Y[indexcum,4]+Y[indexcum,5])/1e6:.3f} ({(Y[indexcum,1]+Y[indexcum,2]+Y[indexcum,4]+Y[indexcum,5])/model.total_pop*100:.3f} %) "
         actualcaseslabel = f"Общее количество случаев в России (накопительное)"
         labeldeaths = f"Смертность в России, макс. = {Y[index2,5]/1e6:.3f} миллионов человек ({Y[index2,5] /model.total_pop*100:.3f}%) \n (# число смертей гораздо менее точное, чем другие, поскольку в настоящее время \n недостаточно данных для того, чтобы сделать прогноз с достаточной уверенностью, \n, хотя это не влияет на другие показатели)"
@@ -350,7 +371,7 @@ for model in Models.values():
         infectedlabel = f"Зараженные люди в России; максимальная = {(Y[index,1]+Y[index,2])/1e6:.1f} миллионов человек ({(Y[index,1]+Y[index,2])/model.total_pop*100:.2f} %)"
 
     elif model.country == "Colombia":
-        title = f"Simulación de la transimición del Covid 19 en Colombia usando un modelo SIIR (Susceptible, Infectado, Aislado, Recuperado).\nPróximos {sim_days} días.\nt=0 es el 28 de Marzo del 2020."
+        title = f"Simulación de la transimición del Covid 19 en Colombia usando un modelo SIIR (Susceptible, Infectado, Aislado, Recuperado).\nPróximos {sim_days} días.\nt=0 es el 29 de Marzo del 2020."
         labelcumulative = f"Total de casos (cumulativo) en Colombia; Maximo # de Casos = {(Y[indexcum,1]+Y[indexcum,2]+Y[indexcum,4]+Y[indexcum,5])/1e3:.2f} mil personas ({(Y[indexcum,1]+Y[indexcum,2]+Y[indexcum, 4])/model.total_pop*100:.3f} % de la población)"
         actualcaseslabel = f"Numero de casos totales en Colombia (cumulativo)(datos del Instituto Nacional de la Salud)"
         labeldeaths = f"Muertes en {model.country}, max = {Y[index2,5]/1e3:.2f} miles de personas ({Y[index2,5]/model.total_pop*100:.3f} %)\n(# de muertes es un numero que es mucho menos preciso que los demas ya que no hay\nsuficientes datos actualmente para hacer una predicción con buena certitud,\n aunque esto no afecto los demás indicadores)"
@@ -359,19 +380,20 @@ for model in Models.values():
         actualrecoveredlabel = f"Personas recuperadas en {model.country}"
         labelrecovered = f"Predicción de personas recuperadas en {model.country} \n*Este indicador podría mejor en los proximos días ya que aún no hay suficientes datos"
         infectedlabel = f"Numero de personas infectadas en cada día en {model.country}; Max = {(Y[index,1]+Y[index,2])/1e3:.2f} mil personas ({(Y[index,1]+Y[index,2])/model.total_pop*100:.3f} %)"
-
+    elif model.country == "United States":
+        xlabel += u"\nDisclaimer: This is a prediction based on a model, which means that by default there will be simplifications and assumptions on the spread of the virus (since you can’t possibly model the interaction of 300 million people!).\nThis means that the numbers will have a certain margin of error, and its prediction will certainly evolve with time and as more measures are taken.\nNow having said that, this model can still be thought as a worst case scenario if NOTHING changes, if they continue to downplay this, and ignore it then you can be sure that we will be closer to what the model predicts than not.\nAnd if anything, this data should show you the gravity of the situation so that you stay at home!\nAnd stay in isolation respecting stay-at-home orders as much as possible because if we don’t a LOT of people will be infected.\nSource: Official reports from state health officials.\nAuthor: (Twitter) @emorell96 (PhD student in Physics at UCSB)."
 
 
 
 
     print(f"Maximum number of infected (quarantined and not quarantined) for {model.country} is {Y[index,1]+Y[index,2]:.2e} ({(Y[index,1]+Y[index,2])/model.total_pop*100:.2f} %) and happens on day {T[index]:.2f}.")
     
-    plt.figure()
+    plt.figure(figsize=(20, 8))
     plt.title(title)
     #plt.plot(T, Y[:,0], label="Susceptible")
     plt.scatter(1+data[model.country][1][:, 0]-len(data[model.country][1]), data[model.country][1][:,1], label = actualcaseslabel)
     plt.plot(T, Y[:,1]  + Y[:,2]+Y[:,4]+Y[:,5], label=labelcumulative)
-    plt.axes().yaxis.set_minor_locator(MultipleLocator(5))
+    
     plt.plot(T, Y[:,5], label=labeldeaths)
     plt.xlabel(xlabel)
     try:
@@ -386,6 +408,8 @@ for model in Models.values():
     plt.plot(T, Y[:,4], label=labelrecovered)
     plt.plot(T, Y[:,1]  + Y[:,2], label= infectedlabel)
     plt.legend()
+    plt.axes().xaxis.set_minor_locator(MultipleLocator(5))
+    plt.savefig(filebase+f"{model.country}.png", dpi=600, quality=95)   
     # plt.figure()
     # Y1  = np.vectorize(model.alphaprime, otypes=[np.float64])(T)
     # Y2 = np.vectorize(model.alpha, otypes=[np.float64])(T)
@@ -398,7 +422,7 @@ for model in Models.values():
     # plt.plot(T/24, Y[:,3], label = "Healthy in Quarantine")
     
     
-    
+
 plt.show()
 
 
