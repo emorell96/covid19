@@ -10,7 +10,9 @@ from countryinfo import CountryInfo
 from matplotlib.ticker import (MultipleLocator, FormatStrFormatter,
                                AutoMinorLocator)
 import datetime as date
-
+from lmfit import Model, Parameters
+from scipy.stats import nbinom
+import warnings
 
 
 mypath = r"C:\Users\emore\Documents\covid19 analysis\data\\"
@@ -40,32 +42,124 @@ for country, table in data.values():
 
 class SIIR:
     #all simulation will be done with hours so the rates are in 1/hour, the delay, risetime, iso days are in days. The c is a percentage.
-    def __init__(self, tfinal, tinitial = 0, beta = 0.01, c = 0.01, total_pop = 40e6, gamma = 7.58e-4, lamda = 0.014, alpha0 = 0.04, isolation_days = 30, isolation_delay = 10, risefalltime = 2, isolation=True, death_rate = 0.025, health_care_threshold = 1e-3, model="SIIRD", country = ""):
+    def __init__(self, tfinal, tinitial = 0, reproduction_number = 2, infectious_rate = 1/6, beta=None ,c = 0.01, total_pop = 40e6, gamma = 7.58e-4, lamda = 0.014, alpha0 = 0.04, isolation_days = 30, isolation_delay = 10, 
+                I0 = 10, care_probability = 0.1, delta = 1, risefalltime = 2, isolation=False, death_rate = 0.025, health_care_threshold = 1e-3, model="SIIRD", country = ""):
         """
         tinitial and tfinal in days!
         """
-        self.beta = beta
+        ##main parameters
+        self._reproduction_number = reproduction_number
+        self._infectious_rate = infectious_rate
+        self._beta = beta
+        self.gamma = gamma
+        self.death_prob = death_rate
+        ##consutation parameters:
+        self.delta = delta
+        self.care_probability = care_probability
+        ##isolation parameters
+        #compulsory isolation
         self.alpha0 = alpha0
+        #compulsory and self isolation
         self.c = c
         self.total_pop = total_pop
         self.gamma = gamma
         self.lamda = lamda
         self.isolation_time = isolation_days
         self.isolation_delay = isolation_delay
+
         self.risetime = risefalltime
         self.t0 = tinitial
         self.t1 = tfinal
+
         self.isolation = isolation
-        self.death_prob = death_rate
-        self.health_care_threshold = health_care_threshold
+        
+
+        
+
+        
+
         self.model = model
         self.finished = False
         self.country = country
-    def set_initial_conditions(self, S0, I0, Qs0 = 0, Qh0 = 0, R0 =0, D0=0):
+        #S0, I0, Qs0 = 0, Qh0 = 0, R0 = 0, D0 = 0
+        
+        self._initial = np.array([self.total_pop-I0,I0, 0, 0, 0, 0]) if self.model == "SIIRD" else np.array([self.total_pop-I0,I0, 0, 0, 0])
+        #not implemented.
+        self.health_care_threshold = health_care_threshold
+
+    @property
+    def beta(self):
+        if self._beta is None:
+            return self._reproduction_number*self._infectious_rate
+        return self._beta
+    @beta.setter
+    def beta(self, value):
+        if self.beta is None:
+            warnings.warn("The variable beta was not initialized and you are trying to set a value for it. Are you sure?\
+                        Wouldn't you want to set R0, and the infectious rate instead?")
+        self._beta = value
+    @property
+    def reproduction_number(self):
+        return self._reproduction_number
+    @reproduction_number.setter
+    def reproduction_number(self, value):
+        #check that value is > 0
+        if value <= 0:
+            warnings.warn("Value for R0 is equal or less than 0. It should be stricly greater than 0. Value will not change.")
+        else:
+            self._reproduction_number = value
+    @property
+    def infectious_rate(self):
+        return self._infectious_rate
+    @infectious_rate.setter
+    def infectious_rate(self, value):
+        if value <= 0:
+            warnings.warn("Value for infectious rate is equal or less than 0. It should be stricly greater than 0. Value will not change.")
+        else:
+            self._infectious_rate = value
+    @property
+    def I0(self):
+        return self.initial[1]
+    @property
+    def R0(self):
+        return self.initial[4]
+    @property
+    def S0(self):
+        return self.total_pop - self.I0 - self.R0 - self.D0
+    @property
+    def D0(self):
         if self.model == "SIIRD":
-            self.initial = np.array([S0, I0, Qs0, Qh0, R0, D0])
-        if self.model == "SIIR":
-            self.initial = np.array([S0, I0, Qs0, Qh0, R0])
+            return self.initial[5]
+        return None
+    @I0.setter
+    def I0(self, value):
+        if value <= 0:
+            warnings.warn("Value for initial infected is equal or less than 0. It should be stricly greater than 0. Value will not change.")
+        else:
+            self.initial[1] = value
+    @R0.setter
+    def R0(self, value):
+        if value <= 0:
+            warnings.warn("Value for initial recovered is equal or less than 0. It should be stricly greater than 0. Value will not change.")
+        else:
+            self.initial[4] = value
+    @S0.setter
+    def S0(self, value):
+        if value <= 0:
+            warnings.warn("Value for initial susceptible cannot be fixed. It depends on other values. Value will not change.")
+    
+    
+    @property
+    def initial(self):
+        return self._initial
+    @initial.setter
+    def initial(self, _initial : np.array):
+        if self.model == "SIIRD" and len(_initial) == 6:
+            self._initial = _initial
+        elif self.model == "SIIR" and len(_initial) == 5:
+            self._initial = _initial
+        else:
+            warnings.warn("Warning, wrong size for initial vector.")
     def alpha(self, t):
         if not self.isolation:
             return 0
@@ -148,21 +242,40 @@ class SIIR:
         out = np.array([Sdot, Idot, Qsdot, Qhdot, Rdot, Ddot])
         #print(np.sum(out))
         return out
-    def solve(self, points):
+    
+    def _solve(self, points):
         self.finished = False
         T = np.linspace(self.t0, self.t1, points)
         if self.model == "SIIR":
             Y = odeint(self.SIIR_Model, self.initial, T, full_output = 0)
-            return (T, Y)
         if self.model == "SIIRD":
             Y = odeint(self.SIIRD_Model, self.initial, T, full_output = 0)
-            return (T, Y)
+        self.T = T
+        self.Y = Y
+        return (T, Y)
+    def _consultations(self):
+        """
+        Calculates the expected number of consultations each day
+        """
+        self.E = np.zeros(self.Y.size[0])
+        self.Cdist = np.empty(self.Y.size[0], dtype=nbinom)
+        for i in range(1, self.Y.size[0]):
+            #incident cases Z_i = S(i-1)-S(i)
+            #expected consultations for Covid 19: E_i = prob * Z_i
+            self.E[i] = (self.Y[i-1, 0]-self.Y[i,0])*self.care_probability
+            r = pow(self.E[i], self.delta)
+            self.Cdist[i] = nbinom(n=r, p=self.E[i]/(r+self.E[i]))
+        
+        
+    def solve(self, points):
+        return self._solve(points)
     
     
 def exponentialgrowth(x, A, tau):
     return A*np.exp(x/tau)
 
-        
+
+
 
 #Overall constants
 
@@ -197,6 +310,7 @@ def fitter(model, time, cases, recovered = None, deaths = None, points = 2000, f
     global_c = model.c
     global_lambda = model.lamda
     global_death = model.death_prob
+    global_pop = 1
     #we first fit to the # of cases with beta and then will fit to the recovered once fixing beta.
     def _fit_beta_2d(t, _beta, _c = global_c, _gamma = global_gamma, _lambda = global_lambda): #, _lambda):
         model.gamma = _gamma
@@ -212,7 +326,7 @@ def fitter(model, time, cases, recovered = None, deaths = None, points = 2000, f
         T, Y = model.solve(points)
         return interp1d(T, Y[:, 4], kind='cubic')(t)
     #This function allows us to fit to the three available metrics at the SAME time. Meaning it will find the best set of parameters which will approximate the solution the best.
-    def _fit_multiple_all(comboData, _beta, _gamma, _c = global_c, _lambda = global_lambda, _death_rate = global_death):
+    def _fit_multiple_all(comboData, _beta, _gamma, _c = global_c, _lambda = global_lambda, _death_rate = global_death, pop=1):
         """
         #This function allows us to fit to the three available metrics at the SAME time. Meaning it will find the best set of parameters which will approximate the solution the best.
         comboData should be an appended numpy array with cases, recovered and deaths.
@@ -226,10 +340,11 @@ def fitter(model, time, cases, recovered = None, deaths = None, points = 2000, f
         model.beta = _beta
         model.c = _c
         model.lamda = _lambda
+        model.total_pop *= pop
         T, Y = model.solve(points)
-        result1 = interp1d(T, Y[:, 1]+ Y[:,2]+Y[:,4]+Y[:,5], kind='linear')(extract1)
+        result1 = interp1d(T, Y[:, 1]+Y[:,2]+Y[:,4]+Y[:,5], kind='linear')(extract1) #+ Y[:,2]+Y[:,4]+Y[:,5]
         result2 = interp1d(T, Y[:, 4], kind='linear')(extract2)
-        result3 = interp1d(T, Y[:,5])(extract3)
+        result3 = interp1d(T, Y[:, 5])(extract3)
         return np.append(np.append(result1, result2), result3)
     def _fit_multiple_cr(comboData, _beta, _gamma, _c = global_c, _lambda = global_lambda, _death_rate = death_rate):
         arrays = len(comboData)/len(cases)
@@ -260,13 +375,24 @@ def fitter(model, time, cases, recovered = None, deaths = None, points = 2000, f
         comboDataY = np.append(np.append(cases, recovered), deaths)
         comboDataX = np.append(np.append(time, time), time)
         if model.country == "Italy":
-            global_beta = 1/3
-            global_gamma = 1/10
-            global_c = 1e-9
+            global_beta = 1/0.4
+            global_gamma = 1/20
+            global_c = 1e-10
             global_lambda = 1/1
-            popt, pcov = curve_fit(_fit_multiple_all, comboDataX, comboDataY, p0=[global_beta, global_gamma, global_c, global_lambda, death_rate], bounds=([1/100, 1/200, 1e-19, 0, 0], [200, 100, 1, 500, 1]))
+            popt, pcov = curve_fit(_fit_multiple_all, comboDataX, comboDataY, p0=[global_beta, global_gamma, global_c, global_lambda, death_rate, global_pop], bounds=([1/100, 1/200, 1e-19, 0, 0, 0], [200, 100, 1, 500, 1, 1]))
         else:
-            popt, pcov = curve_fit(_fit_multiple_all, comboDataX, comboDataY, p0=[global_beta, global_gamma, global_c, global_lambda, death_rate], bounds=([1/100, 1/200, 1e-19, 0, 0], [200, 100, 1, 500, 1]))
+            m = Model(_fit_multiple_all)
+            parameters = Parameters()
+            parameters.add_many(("_beta", global_beta, True, 1/200, 20, None, None),
+                                ("_gamma", global_gamma, False, 1/200, 1/10, None, None),
+                                ("_c", global_c, True, 1e-9, 1, None, None),
+                                ("_lambda", global_lambda, False, 0, 500, None, None),
+                                ("_death_rate", global_death, True, 1/200, 1/1, None, None),
+                                ("pop", global_pop, False, 0.4, 1, None, None))
+            result = m.fit(comboDataY, parameters, comboData = comboDataX)
+            print(result.fit_report())
+            popt = [result.best_values["_beta"], result.best_values["_gamma"], result.best_values["_c"], result.best_values["_lambda"], result.best_values["_death_rate"], result.best_values["pop"]]
+            #popt, pcov = curve_fit(_fit_multiple_all, comboDataX, comboDataY, p0=[global_beta, global_gamma, global_c, global_lambda, death_rate, global_pop], bounds=([1/100, 1/200, 1e-19, 0, 0, 0], [200, 100, 1, 500, 1, 1]))
         model.beta, model.gamma, model.c, model.lamda, model.death_prob = popt
     elif recovered is not None and deaths is None:
         comboDataY = np.append(cases, recovered)
@@ -275,17 +401,20 @@ def fitter(model, time, cases, recovered = None, deaths = None, points = 2000, f
         model.beta, model.gamma, model.c, model.lamda = popt
 
     else: #we  fit to beta
-        popt, pcov = curve_fit(_fit_beta_2d, time[:first_days], cases[:first_days], p0=[global_beta, global_c], bounds=([0, 1e-3], [5, 1]))
-        #We now write the beta into the global variable and proceed with the recovered cases if different than none
-        model.beta = popt[0]#, popt[1] #, global_c, global_lambda
-        model.c = popt[1]
-    print(f"The time constants (in days) for {model.country} are beta = {1/model.beta:2f} and gamma = {1/model.gamma:.2f}. c = {model.c}, lambda = {model.lamda:.1e}, death rate = {model.death_prob}")
+        try:
+            popt, pcov = curve_fit(_fit_beta_2d, time[:first_days], cases[:first_days], p0=[global_beta, global_c], bounds=([0, 1e-3], [5, 1]))
+            #We now write the beta into the global variable and proceed with the recovered cases if different than none
+            model.beta = popt[0]#, popt[1] #, global_c, global_lambda
+            model.c = popt[1]
+        except Exception as e:
+            print(e)
+    print(f"The time constants (in days) for {model.country} are beta = {1/model.beta:2f} and gamma = {1/model.gamma:.2f}. c = {model.c}, lambda = {model.lamda:.1e}, death rate = {model.death_prob}, total_pop = {model.total_pop:.2e}")
     #T, Y = model.solve(points)
     #model parameters have been update, now user can so whatever he wants.
     return model
 # def prediction(days, _gamma = 1/(24*143.5), _beta = 1/(24*4.5), _c = 0.1, _lamda =1/(24*5),  points = 2000):
 #     model = SIIR(days, model="SIIRD",death_rate=0.015,total_pop=150e6,beta=_beta, gamma=_gamma,c=_c, lamda=_lamda, alpha0=1/(24*5), isolation=False ,isolation_delay=2, isolation_days=30, risefalltime=2)
-#     model.set_initial_conditions(model.total_pop, 20, Qh0=0, R0=3, D0=0)
+#     model.initial(model.total_pop, 20, Qh0=0, R0=3, D0=0)
 #     return model.solve(points)
 Models = {}
 for country, table in data.values():
@@ -306,7 +435,7 @@ for country, table in data.values():
             pass
     except:
         pass
-    model.set_initial_conditions(model.total_pop-i0-d0-r0, I0=i0-r0, Qh0=0, R0=r0, D0=d0)
+    model.initial = np.array([model.total_pop-i0-d0-r0, i0-r0, 0, r0, d0])
     try:
         if model.country == "France":
             offset = -1
@@ -331,13 +460,18 @@ for country, table in data.values():
 
 
 for model in Models.values():
-    sim_days = 90
+    sim_days = 100
     model.t1 = model.t1 + sim_days
     
     #activate a 30 days quarantine:
     model.isolation = False
     model.isolation_time = 250
     model.risefalltime = 1
+    # if model.country == "United States":
+    #     model.beta = 1/2.456
+    #     #model.gamma = 1/60
+    #     model.c = 0.1
+    #     model.lamda = 1/8
     #it happens today (so at the last data point)
     model.isolation_delay = len(data[model.country][1])
     #how long do they take to get to safety:
@@ -409,7 +543,7 @@ for model in Models.values():
     plt.plot(T, Y[:,1]  + Y[:,2], label= infectedlabel)
     plt.legend()
     plt.axes().xaxis.set_minor_locator(MultipleLocator(5))
-    plt.savefig(filebase+f"{model.country}.png", dpi=600, quality=95)   
+    #plt.savefig(filebase+f"{model.country}.png", dpi=600, quality=95)   
     # plt.figure()
     # Y1  = np.vectorize(model.alphaprime, otypes=[np.float64])(T)
     # Y2 = np.vectorize(model.alpha, otypes=[np.float64])(T)
